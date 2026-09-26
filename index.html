@@ -513,7 +513,7 @@ details.aura .eff div span:last-child{font-family:var(--mono)}
     <div class="grid" id="ov-cards"></div>
     <details class="sec" id="sec-bh" open><summary><h2>In-game Advanced Stats panel</h2><span class="sumnote" id="sec-bh-note"></span></summary>
       <div class="secin">
-        <p class="hint">The same lines PD2's Advanced Stats window shows, in the same order. Hover or tap a value to see where it comes from.</p>
+        <p class="hint">The same lines PD2's Advanced Stats window shows, in the same order. Hover or tap a value to see where it comes from. Where the window's own number is wrong, the line shows the real value with the window's after it, like "25% (BH shows 100%)".</p>
         <div class="bh" id="bh"></div>
       </div>
     </details>
@@ -4453,9 +4453,13 @@ function panel(C, opts) {
   const P = {};
   P.level = m.level; P.addxp = T(85);
   P.fire = { cur: T(39) + pen, max: maxRes(40) };
-  P.cold = { cur: T(43) + pen, max: maxRes(44), len: T(153) > 0 ? 0 : (2 - Math.min(T(118), 2)) * 50 };
+  // Resist row of the damage table (PD 0x1026F410): penalty, cap, floor -100. Chill/freeze length (rows 5/6) is reduced by
+  // cold resist and poison length (row 7) by stat 110 capped at 75, which BH's lines leave out (bh_panel_review.md 1.6).
+  const resRow = (v, cap) => { const r = v + pen; return r <= 0 ? Math.max(r, -100) : Math.min(r, cap); };
+  const coldBH = T(153) > 0 ? 0 : (2 - Math.min(T(118), 2)) * 50;
+  P.cold = { cur: T(43) + pen, max: maxRes(44), len: Math.trunc(coldBH * (100 - resRow(T(43), maxRes(44))) / 100), lenBH: coldBH };
   P.light = { cur: T(41) + pen, max: maxRes(42) };
-  P.poison = { cur: T(45) + pen, max: maxRes(46), len: 100 - T(110) - pen };
+  P.poison = { cur: T(45) + pen, max: maxRes(46), len: 100 - resRow(T(110), 75), lenBH: 100 - T(110) - pen };
   P.curse = { cur: Math.min(T(504), 75), max: 75, len: Math.max(100 - T(109), 25) };
   P.absorb = { fire: [T(143), T(142)], cold: [T(149), T(148)], light: [T(145), T(144)], magic: [T(147), T(146)] };
   P.dr = { phys: [T(34), T(36)], magic: [T(35), T(37)] };
@@ -4468,15 +4472,25 @@ function panel(C, opts) {
   P.def = { dex: tdiv(dex, 4), equip: T(31), total: tdiv(dex, 4) + T(31) };
   P.dmg = { one: [T(21), T(22)], two: [T(23), T(24)] };
   P.fcr = T(105); P.fbr = T(102); P.fhr = T(99); P.frw = T(96); P.attackrate = T(68); P.ias = T(93);
-  // crushing blow: Two-Hand Mastery (134) + items; efficiency 100 + mastery + items
-  // (BH reads the layer-0 stats, T0: the mastery's own layered entries must not be counted a second time)
-  const T0 = C.T0 || T;
-  P.cb = { chance: masteryStat(C, 'cb', 134) + T0(136), eff: masteryStat(C, 'cbe', 134) + T0(268) + 100 };
-  P.ow = { chance: T(135), dps: T(501) + ((owBase(m.level) + 25) * 25 >> 8) };
+  // Real values are what the server uses; the *BH fields are what BH.dll's window shows (bh_panel_review.md).
+  // crushing blow (PD 0x102AF610): layer-0 stat + weapon-matched layered entries (Two-Hand Mastery only with a 2han
+  // weapon and the other hand empty). BH (0x10079670) reads layer 0 only and subtracts the mastery when a 2han-type
+  // weapon has something in the other hand.
+  const T0 = C.T0 || T, TP = C.TP || (() => 0);
+  const W0 = C.weapons.weapons[0], other = W0 ? (W0 === C.weapons.right ? C.weapons.left : C.weapons.right) : null;
+  const lost = k => (other ? masteryStat(C, k, 134) : 0);
+  P.cb = { chance: T0(136) + TP(136), eff: T0(268) + TP(268) + 100, chanceBH: T0(136) - lost('cb'), effBH: T0(268) - lost('cbe') + 100 };
+  // open wounds (PD 0x102AF060): per-frame drain (level table + 25 + 5 x deep wounds) / 256, 25 frames a second, before
+  // the monster's physical resist. BH adds deep wounds as flat damage per second.
+  P.ow = { chance: T(135), dps: (owBase(m.level) + 25 + 5 * (T(501) | 0)) * 25 / 256, dpsBH: T(501) + ((owBase(m.level) + 25) * 25 >> 8) };
   const dsCap = Math.min(T(210) + 75, 100);
   P.ds = { chance: Math.min(T(141), dsCap), cap: dsCap, mult: T(257) + 150 };
-  P.crit = { chance: Math.min(masteryStat(C, 'crit', 252) + masteryStat(C, 'crit', 135) + masteryStat(C, 'crit', 128) + T0(337) + T0(258), 75), cap: 75, mult: masteryStat(C, 'critmult', 19) + T0(256) + 200 };
-  P.ll = T(60); P.ml = T(62); P.pierceChance = T(166) + T(156);
+  // critical strike (PD 0x10270E00), as combat.js attackOn: weapon-matched mastery crit + 337 + 258, cap 75; no weapon, no
+  // crit. BH adds Claw, One-Hand and Throwing Mastery whatever the weapon and leaves the other masteries out.
+  P.crit = { chance: W0 ? Math.min(Math.max(TP(344) + T0(337) + T0(258), 0), 75) : 0, cap: 75, mult: 200 + (W0 ? T0(256) + TP(256) : 0),
+    chanceBH: Math.min(masteryStat(C, 'crit', 252) + masteryStat(C, 'crit', 135) + masteryStat(C, 'crit', 128) + T0(337) + T0(258), 75), multBH: T0(256) + 200 };
+  // projectile pierce (PD 0x102724CB): 156 + layer-0 166 + weapon-matched layered 166 (Throwing Mastery); BH: layer 0 only
+  P.ll = T(60); P.ml = T(62); P.pierceChance = T0(166) + TP(166) + T(156); P.pierceBH = T0(166) + T(156);
   P.perKill = { life: T(86), mana: T(138) };
   const withMast = (v, mst) => v + Math.trunc(v * mst / 100);
   P.added = {
@@ -5266,6 +5280,7 @@ const E = window.PD2Adv, DV = window.PD2Derive, LB = window.PD2Labels, SPD = win
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const fmt = (v, d) => (v === null || v === undefined || Number.isNaN(v)) ? '–' : (typeof v === 'number' ? (Number.isInteger(v) ? v.toLocaleString('en-US') : v.toLocaleString('en-US', {maximumFractionDigits: d === undefined ? 1 : d})) : v);
 const sgn = v => (v > 0 ? '+' : '') + fmt(v);
+const bhs = (v, bh, u) => String(v) + (u || '') + (String(v) !== String(bh) ? ' (BH shows ' + bh + (u || '') + ')' : '');   // real value, and BH's where it differs
 
 // ------------------------------------------------------------------ state
 let MODEL = null, R = null, SRC_LABEL = '';
@@ -5476,7 +5491,7 @@ function renderOverview(){
     null, tipAttr('life', 'Life', [7, 3, 76, 216])));
   cards.push(card('Attack rating', fmt(cs.ar), 'character screen',
     [['Base (dex, class, gear)', fmt(cs.baseAR)], ['Bonus', sgn(cs.arPct) + '%', false, tipAttr('arp', 'Attack rating %', [119, 342])], ['Hit chance, lvl 85 · 1500 def', R.hit[3].chance + '%']], null, tipAttr('ar', 'Attack rating (flat)', [19, 2])));
-  cards.push(card('Damage', fmt(cs.damage.min) + '–' + fmt(cs.damage.max), 'normal attack',
+  cards.push(card('Damage', fmt(cs.damage.min) + '–' + fmt(cs.damage.max), 'character screen · normal attack',
     [['Physical', fmt(cs.damage.phys.min) + '–' + fmt(cs.damage.phys.max)], ['Damage % (all gear and skills)', sgn(R.cs.ctx.T(17) + R.cs.ctx.T(25) + R.cs.mastery.dmg) + '%', false, tipAttr('ed', 'Enhanced damage', [25, 17, 343])], ['Crushing blow', P.cb.chance + '%'], ['Deadly strike', P.ds.chance + '%']]));
   cards.push(card('Defense', fmt(cs.defense), 'character screen',
     [['Chance to block', R.block.chance > 0 ? R.block.chance + '%' : (R.block.weapon ? R.block.weapon + '% (weapon block)' : 'no shield')], ['Physical damage reduced', P.dr.phys[1] + '% · ' + P.dr.phys[0]], ['Magic damage reduced', P.dr.magic[1] + '% · ' + P.dr.magic[0]]], null, tipAttr('def', 'Defense', [31, 16, 171, 214, 215])));
@@ -5501,9 +5516,9 @@ function renderBH(){
   left.push(g([ln('Additional XP', P.addxp + '%', '', tipAttr('xp', 'Experience gained', [85]))]));
   left.push(g([
     ln('Fire Resist', P.fire.cur + ' / ' + P.fire.max, 'c-fire', tipAttr('rf', 'Fire resist', [39, 40])),
-    ln('Cold Resist', P.cold.cur + ' / ' + P.cold.max + ' · Length ' + P.cold.len + '%', 'c-cold', tipAttr('rc', 'Cold resist, freeze length', [43, 44, 118, 153])),
+    ln('Cold Resist', P.cold.cur + ' / ' + P.cold.max + ' · Length ' + bhs(P.cold.len, P.cold.lenBH, '%'), 'c-cold', tipAttr('rc', 'Cold resist, freeze length', [43, 44, 118, 153])),
     ln('Lightning Resist', P.light.cur + ' / ' + P.light.max, 'c-light', tipAttr('rl', 'Lightning resist', [41, 42])),
-    ln('Poison Resist', P.poison.cur + ' / ' + P.poison.max + ' · Length ' + P.poison.len + '%', 'c-pois', tipAttr('rp', 'Poison resist, poison length', [45, 46, 110])),
+    ln('Poison Resist', P.poison.cur + ' / ' + P.poison.max + ' · Length ' + bhs(P.poison.len, P.poison.lenBH, '%'), 'c-pois', tipAttr('rp', 'Poison resist, poison length', [45, 46, 110])),
     ln('Curse Resist', P.curse.cur + ' / ' + P.curse.max + ' · Length ' + P.curse.len + '%', 'c-curse', tipAttr('rcu', 'Curse resist and length', [504, 109]))]));
   left.push(g([
     ln('Absorption', '<span class="c-fire">' + pair(P.absorb.fire) + '</span> · <span class="c-cold">' + pair(P.absorb.cold) + '</span> · <span class="c-light">' + pair(P.absorb.light) + '</span> · <span class="c-mag">' + pair(P.absorb.magic) + '</span>', '', tipAttr('abs', 'Absorb (flat / %)', [143, 142, 149, 148, 145, 144, 147, 146])),
@@ -5527,12 +5542,12 @@ function renderBH(){
     ln('FCR frames', bpl(f, f && f.frames)), ln('FHR frames', bpl(h, h && h.frames)),
     ln('IAS frames' + (R.ias.skill ? ' (' + esc(R.ias.skill) + ')' : ''), iasList)]));
   right.push(g([
-    ln('Crushing Blow', P.cb.chance + '% · ' + P.cb.eff + '%', '', tipAttr('cb', 'Crushing blow', [136, 268])),
-    ln('Open Wounds', P.ow.chance + '% · +' + P.ow.dps + '/s', '', tipAttr('ow', 'Open wounds', [135, 501])),
+    ln('Crushing Blow', bhs(P.cb.chance, P.cb.chanceBH, '%') + ' · ' + bhs(P.cb.eff, P.cb.effBH, '%'), '', tipAttr('cb', 'Crushing blow', [136, 268])),
+    ln('Open Wounds', P.ow.chance + '% · +' + bhs(fmt(P.ow.dps, 0), fmt(P.ow.dpsBH), '/s'), '', tipAttr('ow', 'Open wounds', [135, 501])),
     ln('Deadly Strike', P.ds.chance + '% / ' + P.ds.cap + '% · ' + P.ds.mult + '%', '', tipAttr('ds', 'Deadly strike', [141, 210, 257])),
-    ln('Critical Strike', P.crit.chance + '% / ' + P.crit.cap + '% · ' + P.crit.mult + '%', '', tipAttr('crit', 'Critical strike', [337, 258, 256, 344])),
+    ln('Critical Strike', bhs(P.crit.chance, P.crit.chanceBH, '%') + ' / ' + P.crit.cap + '% · ' + bhs(P.crit.mult, P.crit.multBH, '%'), '', tipAttr('crit', 'Critical strike', [337, 258, 256, 344])),
     ln('Life Leech', P.ll + '%', '', tipAttr('ll', 'Life leech', [60])), ln('Mana Leech', P.ml + '%', '', tipAttr('ml', 'Mana leech', [62])),
-    ln('Projectile Pierce', P.pierceChance + '%', '', tipAttr('pp', 'Pierce', [156, 166])),
+    ln('Projectile Pierce', bhs(P.pierceChance, P.pierceBH, '%'), '', tipAttr('pp', 'Pierce', [156, 166])),
     ln('HP / MP per Kill', P.perKill.life + ' / ' + P.perKill.mana, '', tipAttr('pk', 'Life and mana per kill', [86, 138]))]));
   const a = P.added;
   right.push(g([
@@ -5566,7 +5581,7 @@ function renderOffense(){
     [['Deadly strike', P.ds.chance + '% (cap ' + P.ds.cap + '%)', false, tipAttr('ds2', 'Deadly strike', [141, 210])], ['Deadly strike multiplier', P.ds.mult + '%'],
      ['Critical strike', P.crit.chance + '% (cap 75%)', false, tipAttr('cr2', 'Critical strike', [337, 258, 344])], ['Critical multiplier', P.crit.mult + '%'],
      ['Crushing blow', P.cb.chance + '%', false, tipAttr('cb2', 'Crushing blow', [136])], ['Crushing blow efficiency', P.cb.eff + '%'],
-     ['Open wounds', P.ow.chance + '%', false, tipAttr('ow2', 'Open wounds', [135])], ['Open wounds damage', '+' + P.ow.dps + ' per second']]));
+     ['Open wounds', P.ow.chance + '%', false, tipAttr('ow2', 'Open wounds', [135])], ['Open wounds damage', '+' + fmt(P.ow.dps, 0) + ' per second']]));
   const a = P.added;
   cards.push(card('Added elemental damage', null, 'with masteries',
     [['<span class="c-fire">Fire</span>', a.fire.join('–')], ['<span class="c-cold">Cold</span>', a.cold.join('–')], ['<span class="c-light">Lightning</span>', a.light.join('–')],
